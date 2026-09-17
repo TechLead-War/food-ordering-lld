@@ -1,0 +1,419 @@
+<title>Blackboard Editor</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+  :root { color-scheme: dark; --bg:#000; --panel:#0a0a0a; --line:#1c1c1c; --num:#4a4a4a; --fg:#e6e6e6; --muted:#8a8a8a; --accent:#7dd3fc; --sel:#151515; }
+  html, body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--fg); font-family:"JetBrains Mono", ui-monospace, Menlo, Consolas, monospace; display:flex; flex-direction:column; }
+  header { display:flex; align-items:center; gap:12px; padding:8px 16px; border-bottom:1px solid var(--line); font-size:12px; color:var(--muted); }
+  header button { background:var(--panel); color:var(--fg); border:1px solid var(--line); font:inherit; padding:4px 8px; border-radius:4px; cursor:pointer; }
+  button:focus-visible, textarea:focus-visible, .file:focus-visible { outline:1px solid var(--accent); outline-offset:-1px; }
+  #path { color:var(--fg); }
+  #stat { margin-left:auto; font-variant-numeric:tabular-nums; }
+  main { flex:1; display:grid; grid-template-columns:220px auto 1fr; overflow:hidden; }
+  #tree { background:var(--panel); border-right:1px solid var(--line); padding:10px 0; font-size:13px; overflow:auto; }
+  #tree .dir { color:var(--muted); padding:3px 12px; white-space:nowrap; }
+  #tree .file { display:block; width:100%; text-align:left; background:none; border:0; color:var(--fg); font:inherit; padding:3px 12px; cursor:pointer; white-space:nowrap; }
+  #tree .file:hover { background:var(--sel); }
+  #tree .file.active { background:var(--sel); color:var(--accent); }
+  #nums { background:var(--panel); color:var(--num); text-align:right; padding:12px 10px 12px 16px; font-size:14px; line-height:22px; white-space:pre; user-select:none; overflow:hidden; border-right:1px solid var(--line); margin:0; }
+  #editor { position:relative; min-width:0; overflow:hidden; background:var(--bg); }
+  #hl, textarea { position:absolute; inset:0; margin:0; border:0; padding:12px 16px; font:inherit; font-size:14px; line-height:22px; white-space:pre; overflow-wrap:normal; tab-size:4; }
+  #hl { overflow:hidden; pointer-events:none; color:var(--fg); }
+  textarea { background:transparent; color:transparent; caret-color:var(--accent); resize:none; overflow:auto; outline:0; }
+  textarea::selection { background:rgba(125,211,252,.25); }
+  .hljs-comment, .hljs-quote { color:#6a9955; }
+  .hljs-keyword, .hljs-selector-tag, .hljs-literal { color:#c586c0; }
+  .hljs-type, .hljs-built_in, .hljs-class .hljs-title, .hljs-title.class_ { color:#4ec9b0; }
+  .hljs-title, .hljs-title.function_, .hljs-function .hljs-title { color:#dcdcaa; }
+  .hljs-string, .hljs-meta .hljs-string { color:#ce9178; }
+  .hljs-number { color:#b5cea8; }
+  .hljs-meta, .hljs-meta .hljs-keyword { color:#569cd6; }
+  .hljs-variable, .hljs-params, .hljs-attr { color:#9cdcfe; }
+  .hljs-section, .hljs-name { color:#569cd6; font-weight:600; }
+  .hljs-operator, .hljs-punctuation { color:#d4d4d4; }
+  @media (max-width:640px){ main{ grid-template-columns:1fr; grid-template-rows:auto auto 1fr; } #tree{ border-right:0; border-bottom:1px solid var(--line); max-height:30vh; } #nums{ display:none; } }
+</style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+
+<header>
+  <span>blackboard</span>
+  <span id="path"></span>
+  <button id="copy" type="button">Copy file</button>
+  <button id="reset" type="button">Reset file</button>
+  <span id="stat"></span>
+</header>
+<main>
+  <nav id="tree" aria-label="Files"></nav>
+  <pre id="nums" aria-hidden="true"></pre>
+  <div id="editor">
+    <pre id="hl" aria-hidden="true"><code id="hlc"></code></pre>
+    <textarea id="code" spellcheck="false" autocapitalize="off" autocomplete="off" aria-label="Code editor"></textarea>
+  </div>
+</main>
+
+<script>
+  // Republish with a new PROJECT id + FILES map for each practice problem.
+  const PROJECT = 'food-ordering-v6';
+  const FILES = {
+'food_ordering/models.py': `from dataclasses import dataclass, field
+from enum import Enum
+
+
+@dataclass
+class Restaurant:
+    name: str
+    menu: dict
+    available_capacity: int
+    items_served: list = field(default_factory=list)
+
+
+class OrderStatus(Enum):
+    PLACED = "PLACED"
+    FULFILLED = "FULFILLED"
+    REJECTED = "REJECTED"
+
+
+@dataclass
+class Order:
+    order_id: str
+    status: OrderStatus = OrderStatus.PLACED
+    reason: str = ""
+    restaurant_for: dict = field(default_factory=dict)
+    fulfilled_items: list = field(default_factory=list)
+
+    def restaurants(self):
+        return list(dict.fromkeys(self.restaurant_for.values()))
+
+    def summary(self):
+        if self.status is OrderStatus.REJECTED:
+            return f"Order Id{self.order_id} : REJECTED ({self.reason})"
+        names = " & ".join(f'"{name}"' for name in self.restaurants())
+        return f"Order Id{self.order_id} : Ordered from {names}"
+`,
+'food_ordering/strategies.py': `from abc import ABC, abstractmethod
+
+
+class RestaurantSelectionStrategy(ABC):
+    @abstractmethod
+    def select_restaurant(self, item, candidates):
+        ...
+
+
+class LowestPriceRestaurantSelectionStrategy(RestaurantSelectionStrategy):
+    def select_restaurant(self, item, candidates):
+        return min(candidates, key=lambda r: r.menu[item], default=None)
+`,
+'food_ordering/service.py': `import threading
+
+from .models import Order, OrderStatus, Restaurant
+from .strategies import LowestPriceRestaurantSelectionStrategy
+
+
+class RestaurantService:
+    def __init__(self):
+        self.lock = threading.RLock()
+        self.restaurants = {}
+
+    def onboard_restaurant(self, name, menu, max_capacity):
+        with self.lock:
+            if name in self.restaurants:
+                raise ValueError(f"restaurant already onboarded: {name}")
+            self.restaurants[name] = Restaurant(name, dict(menu), max_capacity)
+
+    def add_or_update_menu_item(self, restaurant_name, item, price):
+        with self.lock:
+            self.restaurants[restaurant_name].menu[item] = price
+
+    def remove_menu_item(self, restaurant_name, item):
+        with self.lock:
+            self.restaurants[restaurant_name].menu.pop(item, None)
+
+    def get_available_capacity(self, restaurant_name):
+        with self.lock:
+            return self.restaurants[restaurant_name].available_capacity
+
+    def stats(self):
+        with self.lock:
+            return {r.name: (r.available_capacity, list(r.items_served)) for r in self.restaurants.values()}
+
+
+class OrderService:
+    def __init__(self, restaurant_service):
+        self.restaurants = restaurant_service.restaurants
+        self.lock = restaurant_service.lock
+        self.strategies = {"lowest_price": LowestPriceRestaurantSelectionStrategy()}
+        self.orders = {}
+        self.next_order_id = 1
+
+    def register_selection_strategy(self, name, strategy):
+        with self.lock:
+            self.strategies[name] = strategy
+
+    def place_order(self, items, strategy_name):
+        if not items or len(set(items)) != len(items):
+            raise ValueError(f"order must list each item exactly once: {items}")
+        with self.lock:
+            strategy = self.strategies[strategy_name]
+            order = Order(f"#{self.next_order_id}")
+            self.next_order_id += 1
+
+            for item in items:
+                candidates = [r for r in self.restaurants.values() if item in r.menu and r.available_capacity > 0]
+                chosen = strategy.select_restaurant(item, candidates)
+                if chosen is None:
+                    for name in order.restaurant_for.values():
+                        self.restaurants[name].available_capacity += 1
+                    order.restaurant_for.clear()
+                    order.status = OrderStatus.REJECTED
+                    order.reason = f"no restaurant can serve {item}"
+                    return order
+                chosen.available_capacity -= 1
+                order.restaurant_for[item] = chosen.name
+
+            self.orders[order.order_id] = order
+            return order
+
+    def mark_item_fulfilled(self, order_id, item):
+        with self.lock:
+            order = self.orders[order_id]
+            restaurant = self.restaurants[order.restaurant_for[item]]
+            if item in order.fulfilled_items:
+                raise ValueError(f"already fulfilled: {order_id} {item}")
+            order.fulfilled_items.append(item)
+            restaurant.available_capacity += 1
+            restaurant.items_served.append(item)
+            if len(order.fulfilled_items) == len(order.restaurant_for):
+                order.status = OrderStatus.FULFILLED
+
+    def mark_order_fulfilled(self, order_id):
+        with self.lock:
+            order = self.orders[order_id]
+            for item in order.restaurant_for:
+                if item not in order.fulfilled_items:
+                    self.mark_item_fulfilled(order_id, item)
+`,
+'food_ordering/main.py': `from .service import OrderService, RestaurantService
+
+
+def print_stats(restaurants):
+    for name, (capacity, served) in restaurants.stats().items():
+        print(f"{name}: {capacity}  (served: {', '.join(served) or '-'})")
+
+
+def main():
+    restaurants = RestaurantService()
+    orders = OrderService(restaurants)
+    restaurants.onboard_restaurant("A2B", {"Idly": 40, "Vada": 30, "Paper Plain Dosa": 50}, 4)
+    restaurants.onboard_restaurant("Rasaganga", {"Idly": 45, "Set Dosa": 60, "Poori": 25}, 6)
+    restaurants.onboard_restaurant("Eat Fit", {"Idly": 30, "Vada": 40}, 2)
+
+    print(orders.place_order(["Idly", "Poori"], "lowest_price").summary())
+    print(orders.place_order(["Idly", "Vada"], "lowest_price").summary())
+    print_stats(restaurants)
+    print(orders.place_order(["Idly"], "lowest_price").summary())
+    orders.mark_order_fulfilled("#1")
+    orders.mark_order_fulfilled("#2")
+    print(orders.place_order(["Idly"], "lowest_price").summary())
+    print_stats(restaurants)
+
+
+if __name__ == "__main__":
+    main()
+`,
+'tests/__init__.py': ``,
+'tests/test_restaurant.py': `import unittest
+
+from food_ordering.service import OrderService, RestaurantService
+
+
+class TestRestaurant(unittest.TestCase):
+    def setUp(self):
+        self.restaurants = RestaurantService()
+        self.orders = OrderService(self.restaurants)
+        self.restaurants.onboard_restaurant("A2B", {"Idly": 40, "Vada": 30}, 4)
+
+    def test_duplicate_onboarding_raises(self):
+        with self.assertRaises(ValueError):
+            self.restaurants.onboard_restaurant("A2B", {}, 1)
+
+    def test_menu_add_and_remove(self):
+        self.restaurants.add_or_update_menu_item("A2B", "Poori", 25)
+        self.assertEqual(self.orders.place_order(["Poori"], "lowest_price").restaurants(), ["A2B"])
+        self.restaurants.remove_menu_item("A2B", "Poori")
+        self.assertEqual(self.orders.place_order(["Poori"], "lowest_price").reason, "no restaurant can serve Poori")
+`,
+'tests/test_order.py': `import unittest
+
+from food_ordering.models import OrderStatus
+from food_ordering.service import OrderService, RestaurantService
+from food_ordering.strategies import RestaurantSelectionStrategy
+
+
+class HighestPrice(RestaurantSelectionStrategy):
+    def select_restaurant(self, item, candidates):
+        return max(candidates, key=lambda r: r.menu[item], default=None)
+
+
+class TestOrder(unittest.TestCase):
+    def setUp(self):
+        self.restaurants = RestaurantService()
+        self.orders = OrderService(self.restaurants)
+        self.restaurants.onboard_restaurant("A2B", {"Idly": 40, "Vada": 30}, 4)
+        self.restaurants.onboard_restaurant("Rasaganga", {"Idly": 45, "Poori": 25}, 6)
+        self.restaurants.onboard_restaurant("Eat Fit", {"Idly": 30, "Vada": 40}, 2)
+
+    def order(self, *items, strategy="lowest_price"):
+        return self.orders.place_order(list(items), strategy)
+
+    def chosen(self, *items, strategy="lowest_price"):
+        return self.order(*items, strategy=strategy).restaurants()
+
+    def capacity(self, *names):
+        return [self.restaurants.get_available_capacity(n) for n in names]
+
+    def test_sample_flow(self):
+        self.assertEqual(self.chosen("Idly", "Poori"), ["Eat Fit", "Rasaganga"])
+        self.assertEqual(self.chosen("Idly", "Vada"), ["Eat Fit", "A2B"])
+        self.assertEqual(self.capacity("A2B", "Rasaganga", "Eat Fit"), [3, 5, 0])
+        self.assertEqual(self.chosen("Idly"), ["A2B"])
+        self.orders.mark_order_fulfilled("#1")
+        self.orders.mark_order_fulfilled("#2")
+        self.assertEqual(self.chosen("Idly"), ["Eat Fit"])
+
+    def test_summary(self):
+        self.assertEqual(self.order("Idly", "Poori").summary(), 'Order Id#1 : Ordered from "Eat Fit" & "Rasaganga"')
+
+    def test_rejected_order_reserves_nothing(self):
+        order = self.order("Vada", "Biryani")
+        self.assertIs(order.status, OrderStatus.REJECTED)
+        self.assertEqual(order.reason, "no restaurant can serve Biryani")
+        self.assertEqual(order.restaurants(), [])
+        self.assertEqual(self.capacity("A2B"), [4])
+
+    def test_duplicate_or_empty_items_raise(self):
+        with self.assertRaises(ValueError):
+            self.order("Idly", "Idly")
+        with self.assertRaises(ValueError):
+            self.order()
+        self.assertEqual(self.capacity("Eat Fit"), [2])
+
+    def test_item_fulfilment_frees_only_that_restaurant(self):
+        order = self.order("Vada", "Poori")
+        self.orders.mark_item_fulfilled("#1", "Vada")
+        self.assertEqual(self.capacity("A2B", "Rasaganga"), [4, 5])
+        self.assertIs(order.status, OrderStatus.PLACED)
+        self.orders.mark_item_fulfilled("#1", "Poori")
+        self.assertIs(order.status, OrderStatus.FULFILLED)
+
+    def test_double_fulfilment_raises(self):
+        self.order("Idly")
+        self.orders.mark_item_fulfilled("#1", "Idly")
+        with self.assertRaises(ValueError):
+            self.orders.mark_item_fulfilled("#1", "Idly")
+
+    def test_unknown_item_fulfilment_leaves_order_untouched(self):
+        order = self.order("Idly", "Vada")
+        with self.assertRaises(KeyError):
+            self.orders.mark_item_fulfilled("#1", "Biryani")
+        self.assertEqual(order.fulfilled_items, [])
+        self.assertEqual(self.restaurants.stats()["Eat Fit"], (1, []))
+
+    def test_items_served(self):
+        self.order("Idly")
+        self.order("Idly")
+        self.orders.mark_order_fulfilled("#1")
+        self.assertEqual(self.restaurants.stats()["Eat Fit"], (1, ["Idly"]))
+
+    def test_menu_change(self):
+        self.restaurants.add_or_update_menu_item("Rasaganga", "Idly", 10)
+        self.assertEqual(self.chosen("Idly"), ["Rasaganga"])
+
+    def test_custom_strategy(self):
+        self.orders.register_selection_strategy("highest_price", HighestPrice())
+        self.assertEqual(self.chosen("Idly", strategy="highest_price"), ["Rasaganga"])
+`,
+'tests/test_concurrency.py': `import threading
+import unittest
+
+from food_ordering.models import OrderStatus
+from food_ordering.service import OrderService, RestaurantService
+
+
+class TestConcurrency(unittest.TestCase):
+    def test_parallel_orders_never_exceed_capacity(self):
+        restaurants = RestaurantService()
+        orders = OrderService(restaurants)
+        restaurants.onboard_restaurant("Solo", {"X": 1}, 3)
+        results = []
+        threads = [threading.Thread(target=lambda: results.append(orders.place_order(["X"], "lowest_price").status))
+                   for _ in range(10)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        self.assertEqual(results.count(OrderStatus.PLACED), 3)
+        self.assertEqual(restaurants.get_available_capacity("Solo"), 0)
+`,
+'README.md': `# Run
+python3 -m food_ordering.main
+python3 -m unittest discover -s tests -t . -v
+`,
+  };
+
+  const ta = document.getElementById('code'), nums = document.getElementById('nums'), stat = document.getElementById('stat'),
+        tree = document.getElementById('tree'), pathEl = document.getElementById('path');
+  const key = p => `bb:${PROJECT}:${p}`;
+  const load = p => { try { return localStorage.getItem(key(p)) ?? FILES[p]; } catch { return FILES[p]; } };
+  const save = () => { try { localStorage.setItem(key(cur), ta.value); } catch {} };
+  let cur = (() => { try { return localStorage.getItem(`bb:${PROJECT}:open`); } catch {} })();
+  if (!(cur in FILES)) cur = Object.keys(FILES)[0];
+
+  const hl = document.getElementById('hl'), hlc = document.getElementById('hlc');
+  const LANG = { h:'cpp', hpp:'cpp', cpp:'cpp', cc:'cpp', py:'python', md:'markdown', json:'json', sh:'bash', txt:'plaintext' };
+  const langOf = p => LANG[p.split('.').pop()] ?? 'plaintext';
+  const render = () => {
+    const n = ta.value.split('\n').length;
+    nums.textContent = Array.from({length:n}, (_, i) => i + 1).join('\n');
+    stat.textContent = `${n} lines`;
+    const src = ta.value + '\n';
+    try { hlc.innerHTML = hljs.highlight(src, { language: langOf(cur) }).value; }
+    catch { hlc.textContent = src; }
+  };
+  const syncScroll = () => { nums.scrollTop = ta.scrollTop; hl.scrollTop = ta.scrollTop; hl.scrollLeft = ta.scrollLeft; };
+  const open = p => {
+    cur = p; ta.value = load(p); pathEl.textContent = p; render(); syncScroll();
+    try { localStorage.setItem(`bb:${PROJECT}:open`, p); } catch {}
+    tree.querySelectorAll('.file').forEach(b => b.classList.toggle('active', b.dataset.path === p));
+  };
+  const buildTree = () => {
+    const root = {};
+    for (const p of Object.keys(FILES).sort()) {
+      let node = root;
+      const parts = p.split('/');
+      parts.forEach((part, i) => { node = node[part] ??= (i === parts.length - 1 ? p : {}); });
+    }
+    const walk = (node, depth) => Object.entries(node).forEach(([name, v]) => {
+      const el = document.createElement(typeof v === 'string' ? 'button' : 'div');
+      el.style.paddingLeft = `${12 + depth * 14}px`;
+      el.textContent = typeof v === 'string' ? name : name + '/';
+      if (typeof v === 'string') { el.className = 'file'; el.type = 'button'; el.dataset.path = v; el.onclick = () => open(v); }
+      else el.className = 'dir';
+      tree.appendChild(el);
+      if (typeof v !== 'string') walk(v, depth + 1);
+    });
+    walk(root, 0);
+  };
+  buildTree(); open(cur);
+
+  ta.addEventListener('input', () => { render(); save(); });
+  ta.addEventListener('scroll', syncScroll);
+  ta.addEventListener('keydown', e => {
+    if (e.key !== 'Tab') return;
+    e.preventDefault();
+    ta.setRangeText('    ', ta.selectionStart, ta.selectionEnd, 'end'); render(); save();
+  });
+  document.getElementById('copy').onclick = async () => {
+    try { await navigator.clipboard.writeText(ta.value); stat.textContent = 'Copied'; setTimeout(render, 900); } catch { ta.select(); }
+  };
+  document.getElementById('reset').onclick = () => { try { localStorage.removeItem(key(cur)); } catch {} open(cur); };
+</script>
